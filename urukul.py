@@ -2,7 +2,7 @@ from migen import *
 
 
 # increment this if the behavior (LEDs, registers, EEM pins) changes
-__proto_rev__ = 6
+__proto_rev__ = 7
 
 
 class SR(Module):
@@ -29,6 +29,7 @@ class SR(Module):
         self.sdi = Signal()
         self.sdo = Signal()
         self.sel = Signal()
+        self.fd_clk = Signal()
 
         self.di = Signal(width)
         self.do = Signal(width)
@@ -36,34 +37,65 @@ class SR(Module):
         # # #
 
         sr = Signal(width)
-        cnt = Signal(max=width, reset=width-1)
-        cnt_done = Signal()
-        self._cnt_done = cnt_done
+        cnt8 = Signal(4)  #reset 8
+        cnt8next = Signal(4)
+        cnt16 = Signal(4) #reset 15
+        cnt16next = Signal(4)
+        cnt8done = Signal()
+        cnt8wr = Signal()
+        cnt16done = Signal()
+        self._cnt8done = cnt8done
+        self._cn16done = cnt16done
         i = Signal()
         self._i = i
 
+        self.specials += [
+                Instance("FDCP", p_INIT=1, i_CLR=0, i_PRE=~self.sel, i_D=cnt8next[3], o_Q=cnt8[3], i_C=~self.fd_clk),    #cnt8.3 reset 1
+                Instance("FDCP", p_INIT=0, i_CLR=~self.sel, i_PRE=0, i_D=cnt8next[2], o_Q=cnt8[2], i_C=~self.fd_clk),    #cnt8.2 reset 0
+                Instance("FDCP", p_INIT=0, i_CLR=~self.sel, i_PRE=0, i_D=cnt8next[1], o_Q=cnt8[1], i_C=~self.fd_clk),    #cnt8.1 reset 0
+                Instance("FDCP", p_INIT=0, i_CLR=~self.sel, i_PRE=0, i_D=cnt8next[0], o_Q=cnt8[0], i_C=~self.fd_clk),    #cnt8.0 reset 0
+                Instance("FDCP", p_INIT=1, i_CLR=0, i_PRE=~self.sel, i_D=cnt16next[3], o_Q=cnt16[3], i_C=~self.fd_clk),    #cnt16.3 reset 1
+                Instance("FDCP", p_INIT=1, i_CLR=0, i_PRE=~self.sel, i_D=cnt16next[2], o_Q=cnt16[2], i_C=~self.fd_clk),    #cnt16.2 reset 1
+                Instance("FDCP", p_INIT=1, i_CLR=0, i_PRE=~self.sel, i_D=cnt16next[1], o_Q=cnt16[1], i_C=~self.fd_clk),    #cnt16.1 reset 1
+                Instance("FDCP", p_INIT=1, i_CLR=0, i_PRE=~self.sel, i_D=cnt16next[0], o_Q=cnt16[0], i_C=~self.fd_clk),    #cnt16.0 reset 1
+        ]
+
         self.comb += [
                 self.sdo.eq(sr[-1]),
-                cnt_done.eq(cnt == 0),
+
+                If(cnt8done,
+                    cnt8next.eq(0),
+                    If(cnt16done,
+                        cnt16next.eq(0),
+                    ).Else(
+                        cnt16next.eq(cnt16-1),
+                    ),
+                ).Else(
+                    cnt8next.eq(cnt8-1),
+                    cnt16next.eq(15),
+                ),
+
+                cnt8wr.eq(cnt8 == 1),
+                cnt8done.eq(cnt8 == 0),
+                cnt16done.eq(cnt16 == 0),
         ]
         self.sync.sck1 += [
                 If(self.sel,
-                    i.eq(self.sdi)
-                )
+                    i.eq(self.sdi),
+                ),
         ]
         self.sync.sck0 += [
                 If(self.sel,
-                    If(cnt_done,
-                        self.di.eq(Cat(i, sr)),
+                    If(cnt16done,
                         sr.eq(self.do),
-                        cnt.eq(cnt.reset)
+                        self.di[8:width].eq(Cat(i, sr)),
                     ).Else(
+                        If(cnt8wr,
+                            self.di[0:8].eq(Cat(i, sr)),
+                        ),
                         sr.eq(Cat(i, sr)),
-                        cnt.eq(cnt - 1)
-                    )
-                ).Else(
-                    cnt.eq(cnt.reset)
-                )
+                    ),
+                ),
         ]
 
 
@@ -74,34 +106,31 @@ class CFG(Module):
     transaction. The initial state is 0 (all bits cleared).
     The bits in the configuration register (from LSB to MSB) are:
 
-    | Name      | Width | Function                                        |
-    |-----------+-------+-------------------------------------------------|
-    | RF_SW     | 4     | Activates RF switch per channel                 |
-    | LED       | 4     | Activates the red LED per channel               |
-    | PROFILE   | 3     | Controls DDS[0:3].PROFILE[0:2]                  |
-    | ATT_LE    | 1     | Asserts ATT[0:3].ATT_LE                         |
-    | IO_UPDATE | 1     | Asserts DDS[0:3].IO_UPDATE where CFG.MASK_NU    |
-    |           |       | is high                                         |
-    | MASK_NU   | 4     | Disables DDS from QSPI interface, disables      |
-    |           |       | IO_UPDATE control through IO_UPDATE EEM signal, |
-    |           |       | enables access through CS=3, enables control of |
-    |           |       | IO_UPDATE through CFG.IO_UPDATE                 |
-    | CLK_SEL   | 1     | Selects CLK source                              |
-    | SYNC_SEL  | 1     | Selects SYNC source                             |
-    | RST       | 1     | Asserts DDS[0:3].RESET, DDS[0:3].MASTER_RESET,  |
-    |           |       | ATT[0:3].RST                                    |
-    | IO_RST    | 1     | Asserts DDS[0:3].IO_RESET                       |
+    | Name      | Width | Bits  | Function                                        |
+    |-----------+-------+-------+-------------------------------------------------|
+    | RF_SW     | 4     | 0-3   | Activates RF switch per channel                 |
+    | PROFILE   | 3     | 4-6   | Controls DDS[0:3].PROFILE[0:2]                  |
+    | IO_UPDATE | 1     | 7     | Asserts DDS[0:3].IO_UPDATE where CFG.MASK_NU    |
+    |           |       |       | is high                                         |
+    |-----------+-------+-------+-------------------------------------------------|
+    | LED       | 4     | 8-11  | Activates the red LED per channel               |
+    | MASK_NU   | 4     | 12-15 | Disables DDS from QSPI interface, disables      |
+    |           |       |       | IO_UPDATE control through IO_UPDATE EEM signal, |
+    |           |       |       | enables access through CS=3, enables control of |
+    |           |       |       | IO_UPDATE through CFG.IO_UPDATE                 |
+    | CLK_SEL   | 1     | 16    | Selects CLK source                              |
+    | SYNC_SEL  | 1     | 17    | Selects SYNC source                             |
+    | RST       | 1     | 18    | Asserts DDS[0:3].RESET, DDS[0:3].MASTER_RESET,  |
+    |           |       |       | ATT[0:3].RST                                    |
+    | IO_RST    | 1     | 19    | Asserts DDS[0:3].IO_RESET                       |
     """
     def __init__(self, platform, n=4):
         self.data = Record([
             ("rf_sw", n),
-            ("led", n),
-
             ("profile", 3),
-
-            ("dummy", 1),
             ("io_update", 1),
 
+            ("led", n),
             ("mask_nu", 4),
 
             ("clk_sel", 1),
@@ -131,6 +160,7 @@ class CFG(Module):
             self.comb += [
                     sw.oe.eq(0),
                     dds.rf_sw.eq(sw.io | self.data.rf_sw[i]),
+                    dds.rf_sw.eq(self.data.rf_sw[i]),
                     dds.led[0].eq(dds.rf_sw),  # green
                     dds.led[1].eq(self.data.led[i] | (en_9910 & (
                         dds.smp_err | ~dds.pll_lock))),  # red
@@ -140,14 +170,14 @@ class CFG(Module):
 class Status(Module):
     """Status register.
 
-    | Name      | Width | Function                                  |
-    |-----------+-------+-------------------------------------------|
-    | RF_SW     | 4     | Actual RF switch and green LED activation |
-    |           |       | (including that by EEM1.SW[0:3])          |
-    | SMP_ERR   | 4     | DDS[0:3].SMP_ERR                          |
-    | PLL_LOCK  | 4     | DDS[0:3].PLL_LOCK                         |
-    | IFC_MODE  | 4     | IFC_MODE[0:3]                             |
-    | PROTO_REV | 8     | Protocol revision (see __proto_rev__)     |
+    | Name      | Width | Bits  | Function                                  |
+    |-----------+-------+-------+-------------------------------------------|
+    | RF_SW     | 4     | 0-3   | Actual RF switch and green LED activation |
+    |           |       |       | (including that by EEM1.SW[0:3])          |
+    | SMP_ERR   | 4     | 4-7   | DDS[0:3].SMP_ERR                          |
+    | PLL_LOCK  | 4     | 8-11  | DDS[0:3].PLL_LOCK                         |
+    | IFC_MODE  | 4     | 12-15 | IFC_MODE[0:3]                             |
+    | PROTO_REV | 4     | 16-19 | Protocol revision (see __proto_rev__)     |
 
     The status data is loaded into the CFG shift register at the last (24th)
     falling SCK edge. Consequently the data read refers to the status at the
@@ -159,7 +189,7 @@ class Status(Module):
             ("smp_err", n),
             ("pll_lock", n),
             ("ifc_mode", 4),
-            ("proto_rev", 8)
+            ("proto_rev", 4)
         ])
         self.comb += [
                 self.data.ifc_mode.eq(platform.lookup_request("ifc_mode")),
@@ -201,24 +231,24 @@ class Urukul(Module):
     high resolution RF switching and synchronization signals. NU-Servo mode
     always requires two EEM connectors.
 
-    | EEM  | LVDS pair | PCB net | Function                |
-    |------+-----------+---------+-------------------------|
-    | EEM0 | 0         | A0      | SCLK                    |
-    | EEM0 | 1         | A1      | MOSI                    |
-    | EEM0 | 2         | A2      | MISO, NU_CLK            |
-    | EEM0 | 3         | A3      | CS0                     |
-    | EEM0 | 4         | A4      | CS1                     |
-    | EEM0 | 5         | A5      | CS2, NU_CS              |
-    | EEM0 | 6         | A6      | IO_UPDATE               |
-    | EEM0 | 7         | A7      | DDS_RESET, SYNC_OUT     |
-    | EEM1 | 0         | B8      | SYNC_CLK, NU_MOSI0      |
-    | EEM1 | 1         | B9      | SYNC_IN, NU_MOSI1       |
-    | EEM1 | 2         | B10     | IO_UPDATE_RET, NU_MOSI2 |
-    | EEM1 | 3         | B11     | NU_MOSI3                |
-    | EEM1 | 4         | B12     | SW0                     |
-    | EEM1 | 5         | B13     | SW1                     |
-    | EEM1 | 6         | B14     | SW3                     |
-    | EEM1 | 7         | B15     | SW4                     |
+    | EEM  | LVDS pair | PCB net | Function                | Type          |
+    |------+-----------+---------+-------------------------|---------------|
+    | EEM0 | 0         | A0      | SCLK                    | Input         |
+    | EEM0 | 1         | A1      | MOSI                    | Input         |
+    | EEM0 | 2         | A2      | MISO, NU_CLK            | Output, Input |
+    | EEM0 | 3         | A3      | CS0                     | Input         |
+    | EEM0 | 4         | A4      | CS1                     | Input         |
+    | EEM0 | 5         | A5      | CS2, NU_CS              | Input         |
+    | EEM0 | 6         | A6      | IO_UPDATE               | Input         |
+    | EEM0 | 7         | A7      | DDS_RESET, SYNC_OUT     | Input         |
+    | EEM1 | 0         | B8      | SYNC_CLK, NU_MOSI0      | Input         |
+    | EEM1 | 1         | B9      | SYNC_IN, NU_MOSI1       | Input         |
+    | EEM1 | 2         | B10     | IO_UPDATE_RET, NU_MOSI2 | Output        |
+    | EEM1 | 3         | B11     | NU_MOSI3                | Input         |
+    | EEM1 | 4         | B12     | SW0                     | Input         |
+    | EEM1 | 5         | B13     | SW1                     | Input         |
+    | EEM1 | 6         | B14     | SW3                     | Input         |
+    | EEM1 | 7         | B15     | SW4                     | Input         |
 
     IFC_MODE
     --------
@@ -416,7 +446,7 @@ class Urukul(Module):
 
         cfg = CFG(platform)
         stat = Status(platform)
-        sr = SR(24)
+        sr = SR(20)
         assert len(cfg.data) <= len(sr.di)
         assert len(stat.data) <= len(sr.do)
         self.submodules += cfg, stat, sr
@@ -437,6 +467,7 @@ class Urukul(Module):
 
                 sr.sel.eq(sel[1]),
                 sr.sdi.eq(mosi),
+                sr.fd_clk.eq(self.cd_sck1.clk),
                 miso[1].eq(sr.sdo),
 
                 cfg.data.raw_bits().eq(sr.di),
@@ -465,9 +496,9 @@ class Urukul(Module):
 
         tp = [platform.request("tp", i) for i in range(5)]
         self.comb += [
-                tp[0].eq(Cat([ddsi.smp_err for ddsi in dds]) == 0),
-                tp[1].eq(Cat([~ddsi.pll_lock for ddsi in dds]) == 0),
-                tp[2].eq(sr._cnt_done),
-                tp[3].eq(sr._i),
-                tp[4].eq(sr.sel),
+                tp[0].eq(self.cd_sck1.clk),
+                tp[1].eq(dds[3].sdi),
+                tp[2].eq(dds[3].sdo),
+                tp[3].eq(sr._cnt8done),
+                tp[4].eq(sr.sdo),
         ]
