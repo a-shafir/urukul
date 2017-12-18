@@ -99,7 +99,7 @@ class CFG(Module):
 
             ("profile", 3),
 
-            ("att_le", 1),
+            ("dummy", 1),
             ("io_update", 1),
 
             ("mask_nu", 4),
@@ -123,7 +123,6 @@ class CFG(Module):
                 dds_common.master_reset.eq(self.data.rst),
                 dds_common.io_reset.eq(self.data.io_rst),
                 att.rst_n.eq(~self.data.rst),
-                att.le.eq(self.data.att_le),
         ]
 
         for i in range(n):
@@ -458,6 +457,11 @@ class Urukul(Module):
                     ddsi.io_update.eq(Mux(cfg.data.mask_nu[i],
                         cfg.data.io_update, eem[6].i)),
             ]
+
+        #ATT latch logic
+        self.specials += [
+                Instance("FDC", p_INIT=1, i_CLR=sel[2] & self.cd_sck1.clk, i_D=1, o_Q=att.le, i_C=~eem[4].i),
+        ]
 
         tp = [platform.request("tp", i) for i in range(5)]
         self.comb += [
